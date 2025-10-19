@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Interactive Sky Chart — Subreddit</title>
+<style>
+  :root{
+    --bg:#07112a; --panel:#0f2746; --accent:#6be0ff; --muted:#9fb4d6;
+  }
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+  body{background:linear-gradient(180deg,var(--bg),#021124);color:#e6f3ff;display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px;}
+  .container{width:1100px;max-width:96vw;display:grid;grid-template-columns:1fr 320px;gap:12px;}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; padding:12px; box-shadow: 0 6px 18px rgba(2,7,19,0.6); border:1px solid rgba(255,255,255,0.03);}
+  canvas{width:100%;height:720px;border-radius:8px;background:transparent;display:block;}
+  .controls{display:flex;flex-direction:column;gap:10px;}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px;}
+  input[type="text"], input[type="number"], select{width:100%;padding:8px;border-radius:8px;background:#02182a;border:1px solid rgba(255,255,255,0.04);color:inherit;box-sizing:border-box;}
+  .row{display:flex;gap:8px;}
+  button{padding:8px 10px;border-radius:8px;border:none;background:linear-gradient(90deg,var(--accent),#3bd1ff);color:#002;cursor:pointer;font-weight:600;}
+  .small{font-size:13px;padding:6px 8px;border-radius:8px;background:#082034;border:1px solid rgba(255,255,255,0.02);}
+  .muted{color:var(--muted);font-size:13px;}
+  .credits{font-size:12px;color:var(--muted);margin-top:8px;}
+  #legend{display:flex;gap:8px;flex-wrap:wrap;}
+  .legend-item{font-size:12px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.02);}
+  .searchbox{display:flex;gap:8px;}
+  @media (max-width:960px){ .container{grid-template-columns:1fr;} canvas{height:60vh;} }
+</style>
+</head>
+<body>
+  <h2 style="margin:0">Interactive Sky Chart — for your subreddit 🌌</h2>
+  <div class="container">
+    <div class="card">
+      <canvas id="skycanvas" width="1000" height="720"></canvas>
+      <div class="muted" style="margin-top:8px">Pan: drag • Zoom: mouse wheel / pinch • Hover: star info • Click: center</div>
+    </div>
+
+    <div class="card controls">
+      <div>
+        <label>Location</label>
+        <div class="row">
+          <input id="lat" type="number" step="0.0001" placeholder="Latitude" value="6.9271" />
+          <input id="lon" type="number" step="0.0001" placeholder="Longitude" value="79.8612" />
+          <button id="useLocation" class="small">Use my location</button>
+        </div>
+        <div class="muted" style="margin-top:6px">Example: Colombo (lat/lon pre-filled). Change to any spot to view sky there.</div>
+      </div>
+
+      <div>
+        <label>Date & Time (UTC)</label>
+        <div class="row">
+          <input id="datetime" type="datetime-local" style="flex:1" />
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button id="nowBtn">Now</button>
+          <button id="prevHour" class="small">-1h</button>
+          <button id="nextHour" class="small">+1h</button>
+        </div>
+      </div>
+
+      <div>
+        <label>Search Star</label>
+        <div class="searchbox">
+          <input id="search" type="text" placeholder="Type star name (Vega, Sirius)..." />
+          <button id="goSearch" class="small">Find</button>
+        </div>
+      </div>
+
+      <div>
+        <label>Display</label>
+        <div id="legend">
+          <div class="legend-item"><input id="showGrid" type="checkbox" checked/> Sky Grid</div>
+          <div class="legend-item"><input id="showConst" type="checkbox" checked/> Constellation lines</div>
+          <div class="legend-item"><input id="showLabels" type="checkbox" checked/> Star labels</div>
+        </div>
+      </div>
+
+      <div>
+        <label>Zoom</label>
+        <input id="zoom" type="range" min="0.5" max="2.5" step="0.01" value="1" />
+      </div>
+
+      <div>
+        <label>Center on (Alt °, Az °)</label>
+        <div class="row">
+          <input id="centerAlt" type="number" step="0.1" placeholder="Alt" value="90" />
+          <input id="centerAz" type="number" step="0.1" placeholder="Az" value="0" />
+          <button id="applyCenter" class="small">Apply</button>
+        </div>
+      </div>
+
+      <div style="margin-top:6px;">
+        <label>Info</label>
+        <div id="info" class="muted">Hover a star to see details here.</div>
+      </div>
+
+      <div class="credits">Built for your sub — copy & expand the star catalog and add planets later. ❤️</div>
+    </div>
+  </div>
+
+<script>
+/*
+  Simple interactive sky chart (top-down dome / azimuthal projection).
+  - Built-in small bright star catalog (RA hours, Dec degrees).
+  - Converts RA/Dec -> Alt/Az using observer lat/lon and UTC date.
+  - Interaction: pan/zoom/hover/search.
+*/
+
+const canvas = document.getElementById('skycanvas');
+const ctx = canvas.getContext('2d', {alpha:true});
+let W = canvas.width, H = canvas.height;
+
+function resizeCanvas(){
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(600, Math.floor(rect.width * devicePixelRatio));
+  canvas.height = Math.max(400, Math.floor(rect.height * devicePixelRatio));
+  W = canvas.width; H = canvas.height;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// small bright-star catalog: name, ra (hours), dec (deg), mag
+const stars = [
+  ["Sirius", 6.752477, -16.716116, -1.46],
+  ["Canopus", 6.399203, -52.695661, -0.74],
+  ["Arcturus", 14.261033, 19.182409, -0.05],
+  ["Vega", 18.615649, 38.783689, 0.03],
+  ["Capella", 5.278155, 45.997991, 0.08],
+  ["Rigel", 5.242298, -8.201640, 0.18],
+  ["Procyon", 7.655033, 5.225000, 0.34],
+  ["Betelgeuse", 5.919529, 7.407064, 0.42],
+  ["Achernar", 1.628571, -57.236753, 0.46],
+  ["Hadar", 14.063724, -60.373039, 0.61],
+  ["Altair", 19.846389, 8.868322, 0.77],
+  ["Aldebaran", 4.598677, 16.509302, 0.85],
+  ["Antares", 16.490129, -26.431946, 0.96],
+  ["Spica", 13.419884, -11.161322, 0.98],
+  ["Pollux", 7.755263, 28.026198, 1.14],
+  ["Fomalhaut", 22.960848, -29.622236, 1.16],
+  ["Deneb", 20.690532, 45.280338, 1.25],
+  ["Mimosa", 12.263443, -59.688764, 1.25],
+  ["Regulus", 10.139531, 11.967208, 1.35],
+  ["Adhara", 6.977127, -28.972084, 1.50]
+];
+
+// small constellations connections (by name indices)
+const constellines = [
+  ["Betelgeuse","Rigel"], ["Betelgeuse","Bell?"] // minimal — extend later
+];
+
+// UI elements
+const latEl = document.getElementById('lat'), lonEl = document.getElementById('lon');
+const datetimeEl = document.getElementById('datetime'), nowBtn = document.getElementById('nowBtn');
+const useLocationBtn = document.getElementById('useLocation');
+const infoEl = document.getElementById('info');
+const zoomEl = document.getElementById('zoom');
+const showGridEl = document.getElementById('showGrid'), showLabelsEl = document.getElementById('showLabels');
+const searchEl = document.getElementById('search'), goSearch = document.getElementById('goSearch');
+const centerAltEl = document.getElementById('centerAlt'), centerAzEl = document.getElementById('centerAz'), applyCenter = document.getElementById('applyCenter');
+const prevHour = document.getElementById('prevHour'), nextHour = document.getElementById('nextHour');
+
+function toISODateLocal(d){
+  // returns "YYYY-MM-DDTHH:MM" for input[type=datetime-local]
+  const pad = (n)=>String(n).padStart(2,'0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+function setNow(){
+  const now = new Date();
+  datetimeEl.value = toISODateLocal(now);
+}
+setNow();
+
+// conversions
+function hmsToDeg(hours) { return hours * 15.0; }
+function degToRad(d){return d*Math.PI/180;}
+function radToDeg(r){return r*180/Math.PI;}
+
+// compute days since J2000.0 (UTC)
+function daysSinceJ2000(date){
+  // date is JS Date (UTC)
+  const jd = (date.getTime() / 86400000.0) + 2440587.5; // Julian date
+  return jd - 2451545.0;
+}
+// Approx GMST in hours (approx good to seconds)
+function gmstHours(date){
+  const d = daysSinceJ2000(date);
+  const gmst = 18.697374558 + 24.06570982441908 * d;
+  return ((gmst % 24) + 24) % 24;
+}
+
+// Convert RA (hours) & Dec (deg) to Alt/Az for observer lat/lon and date
+function raDecToAltAz(raHours, decDeg, latDeg, lonDeg, date){
+  // compute local sidereal time in degrees
+  const gmst = gmstHours(date);
+  const lstHours = (gmst + lonDeg/15.0) % 24;
+  const haHours = (lstHours - raHours + 24) % 24; // hour angle in hours
+  const haRad = degToRad(haHours*15.0);
+  const decRad = degToRad(decDeg), latRad = degToRad(latDeg);
+
+  // altitude
+  const sinAlt = Math.sin(decRad)*Math.sin(latRad) + Math.cos(decRad)*Math.cos(latRad)*Math.cos(haRad);
+  const alt = Math.asin(Math.max(-1, Math.min(1, sinAlt)));
+  // azimuth (from north to east)
+  const cosAz = (Math.sin(decRad) - Math.sin(alt)*Math.sin(latRad)) / (Math.cos(alt)*Math.cos(latRad));
+  let az = Math.acos(Math.max(-1, Math.min(1, cosAz)));
+  // determine sign by sin(HA)
+  if (Math.sin(haRad) > 0) az = 2*Math.PI - az;
+  return {alt: radToDeg(alt), az: radToDeg(az)};
+}
+
+// projection: convert Alt/Az to canvas x,y using azimuthal equidistant projection centered on centerAlt/centerAz
+let view = {
+  centerAlt: 90, // top (zenith)
+  centerAz: 0,
+  zoom: 1,
+  panX: 0,
+  panY: 0
+};
+
+function altAzToXY(alt, az){
+  // convert degrees to relative coordinates
+  // angular distance from center:
+  const ca = degToRad(90 - view.centerAlt), sa = Math.sin(ca); // center co-alt converted
+  // simpler: compute angular distance using spherical law of cosines
+  const altRad = degToRad(alt), azRad = degToRad(az);
+  const centerAltRad = degToRad(view.centerAlt), centerAzRad = degToRad(view.centerAz);
+  // angular distance
+  const cosGamma = Math.sin(altRad)*Math.sin(centerAltRad) + Math.cos(altRad)*Math.cos(centerAltRad)*Math.cos(azRad - centerAzRad);
+  const gamma = Math.acos(Math.max(-1,Math.min(1,cosGamma))); // radians
+  // azimuth relative to center
+  const y = Math.sin(azRad - centerAzRad) * Math.cos(altRad);
+  const x = Math.cos(centerAltRad)*Math.sin(altRad) - Math.sin(centerAltRad)*Math.cos(altRad)*Math.cos(azRad-centerAzRad);
+  let theta = Math.atan2(y, x); // direction
+  // map gamma -> radius (equidistant projection)
+  const maxRadius = Math.min(W/2, H/2) * 0.95 * view.zoom;
+  const R = (gamma / (Math.PI/2)) * maxRadius; // gamma range 0..pi/2 to 0..maxRadius
+  const cx = W/2 + view.panX + R*Math.cos(theta);
+  const cy = H/2 + view.panY - R*Math.sin(theta);
+  return {x:cx, y:cy, r:R, onDisk: gamma <= Math.PI/2 + 1e-6};
+}
+
+// drawing
+function clear(){
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+  // background gradient
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'rgba(2,9,28,0.9)');
+  grad.addColorStop(1,'rgba(1,8,19,0.5)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function drawGrid(){
+  if (!showGridEl.checked) return;
+  ctx.save();
+  ctx.globalAlpha = 0.45;
+  ctx.strokeStyle = "rgba(120,180,255,0.06)";
+  ctx.lineWidth = 1;
+  // draw altitude rings every 15 degrees from horizon to zenith
+  for(let alt=0; alt<=90; alt+=15){
+    // sample az 0..360 to produce ring polyline
+    ctx.beginPath();
+    let started=false;
+    for(let az=0; az<=360; az+=3){
+      const p = altAzToXY(alt, az);
+      if(!p.onDisk) { continue; }
+      if(!started){ ctx.moveTo(p.x, p.y); started=true; } else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+  }
+  // azimuth spokes
+  for(let az=0; az<360; az+=30){
+    const p1 = altAzToXY(0, az);
+    const p2 = altAzToXY(90, az);
+    if(p1.onDisk && p2.onDisk){
+      ctx.beginPath();
+      ctx.moveTo(p1.x,p1.y);
+      ctx.lineTo(p2.x,p2.y);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawStars(obsLat, obsLon, date){
+  // compute star positions & draw
+  const out = [];
+  stars.forEach(s=>{
+    const o = raDecToAltAz(s[1], s[2], obsLat, obsLon, date);
+    const p = altAzToXY(o.alt, o.az);
+    out.push({meta:s, alt:o.alt, az:o.az, x:p.x, y:p.y, onDisk:p.onDisk});
+    if(!p.onDisk) return;
+    // size by magnitude (approx)
+    const mag = s[3];
+    const size = Math.max(1.0, 6 - (mag+1)); // simple scale
+    ctx.beginPath();
+    ctx.fillStyle = `rgba(255,255,255,${Math.max(0.25, 1 - (mag/6))})`;
+    ctx.arc(p.x, p.y, size, 0, Math.PI*2);
+    ctx.fill();
+    if(showLabelsEl.checked && size>1.3){
+      ctx.font = (12 * (size/3)) + "px Inter, system-ui, Arial";
+      ctx.fillStyle = "rgba(220,235,255,0.9)";
+      ctx.fillText(s[0], p.x + (size+4), p.y + 4);
+    }
+  });
+  return out;
+}
+
+// hover handling
+let lastMouse = {x:0,y:0};
+let hovered = null;
+
+canvas.addEventListener('mousemove', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left);
+  const y = (e.clientY - rect.top);
+  lastMouse = {x,y};
+  checkHover();
+});
+
+canvas.addEventListener('click', (e)=>{
+  if(hovered){
+    // center on hovered star
+    view.centerAlt = hovered.alt;
+    view.centerAz = hovered.az;
+    centerAltEl.value = view.centerAlt.toFixed(2);
+    centerAzEl.value = view.centerAz.toFixed(2);
+    render();
+  }
+});
+
+// pan & zoom
+let isDragging=false, lastDrag=null;
+canvas.addEventListener('mousedown', (e)=>{ isDragging=true; lastDrag={x:e.clientX,y:e.clientY}; canvas.style.cursor='grabbing';});
+window.addEventListener('mouseup', ()=>{ isDragging=false; lastDrag=null; canvas.style.cursor='default';});
+window.addEventListener('mousemove',(e)=>{
+  if(isDragging && lastDrag){
+    const dx = e.clientX - lastDrag.x, dy = e.clientY - lastDrag.y;
+    view.panX += dx; view.panY += dy;
+    lastDrag = {x:e.clientX,y:e.clientY};
+    render();
+  }
+});
+canvas.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const z = parseFloat(zoomEl.value);
+  const nz = Math.max(0.5, Math.min(2.5, z + (e.deltaY>0?-0.03:0.03)));
+  zoomEl.value = nz;
+  view.zoom = nz;
+  render();
+},{passive:false});
+
+// redraw logic
+function render(){
+  clear();
+  drawGrid();
+  // draw horizon circle
+  const circleRadius = Math.min(W/2, H/2) * 0.95 * view.zoom;
+  ctx.beginPath();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(120,180,255,0.06)";
+  ctx.arc(W/2 + view.panX, H/2 + view.panY, circleRadius, 0, Math.PI*2);
+  ctx.stroke();
+
+  // draw cardinal labels (N,E,S,W)
+  ctx.fillStyle = 'rgba(190,220,255,0.9)';
+  ctx.font = '13px Inter, Arial';
+  const cardinals = [
+    {az:0,label:'N'},
+    {az:90,label:'E'},
+    {az:180,label:'S'},
+    {az:270,label:'W'}
+  ];
+  cardinals.forEach(c=>{
+    const p = altAzToXY(10, c.az);
+    if(p.onDisk) ctx.fillText(c.label, p.x+6, p.y+4);
+  });
+
+  // get observer settings
+  const lat = parseFloat(latEl.value) || 0;
+  const lon = parseFloat(lonEl.value) || 0;
+  const dt = new Date(datetimeEl.value ? (datetimeEl.value + ':00Z') : (new Date().toISOString()));
+  const starPositions = drawStars(lat, lon, dt);
+
+  // update hovered check deferred
+  lastStarList = starPositions;
+  checkHover();
+}
+
+// hover check uses lastStarList
+let lastStarList = [];
+function checkHover(){
+  hovered = null;
+  const mx = lastMouse.x, my = lastMouse.y;
+  for(const s of lastStarList){
+    if(!s.onDisk) continue;
+    const d2 = (s.x - mx)*(s.x - mx) + (s.y - my)*(s.y - my);
+    if(d2 < 100){ hovered = s; break; } // ~10px
+  }
+  if(hovered){
+    infoEl.innerText = `${hovered.meta[0]} — mag ${hovered.meta[3].toFixed(2)} — Alt ${hovered.alt.toFixed(2)}°, Az ${hovered.az.toFixed(2)}° — RA ${hovered.meta[1]}h, Dec ${hovered.meta[2]}°`;
+    // simple tooltip
+    render();
+    // draw tooltip circle highlight
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(110,235,255,0.95)';
+    ctx.lineWidth = 2;
+    ctx.arc(hovered.x, hovered.y, 10, 0, Math.PI*2);
+    ctx.stroke();
+  } else {
+    infoEl.innerText = 'Hover a star to see details here.';
+    render();
+  }
+}
+
+// UI wiring
+nowBtn.addEventListener('click', ()=>{
+  setNow();
+  render();
+});
+prevHour.addEventListener('click', ()=>{
+  if(!datetimeEl.value) setNow();
+  const d = new Date(datetimeEl.value + ':00Z');
+  d.setUTCHours(d.getUTCHours() - 1);
+  datetimeEl.value = toISODateLocal(d);
+  render();
+});
+nextHour.addEventListener('click', ()=>{
+  if(!datetimeEl.value) setNow();
+  const d = new Date(datetimeEl.value + ':00Z');
+  d.setUTCHours(d.getUTCHours() + 1);
+  datetimeEl.value = toISODateLocal(d);
+  render();
+});
+
+useLocationBtn.addEventListener('click', ()=>{
+  if(!navigator.geolocation){ alert('Geolocation not supported'); return; }
+  navigator.geolocation.getCurrentPosition(pos=>{
+    latEl.value = pos.coords.latitude.toFixed(5);
+    lonEl.value = pos.coords.longitude.toFixed(5);
+    render();
+  }, err=>{
+    alert('Geolocation denied or failed.');
+  });
+});
+
+zoomEl.addEventListener('input', ()=>{ view.zoom = parseFloat(zoomEl.value); render(); });
+showGridEl.addEventListener('change', render); showLabelsEl.addEventListener('change', render);
+
+// search
+goSearch.addEventListener('click', ()=>{
+  const q = searchEl.value.trim().toLowerCase();
+  if(!q) return;
+  const found = stars.find(s=>s[0].toLowerCase().startsWith(q));
+  if(!found){ alert('Star not found in the built-in catalog. Try "Sirius" or "Vega".'); return; }
+  // compute its alt/az and center on it
+  const lat = parseFloat(latEl.value)||0, lon = parseFloat(lonEl.value)||0;
+  const dt = new Date(datetimeEl.value ? (datetimeEl.value + ':00Z') : new Date().toISOString());
+  const pos = raDecToAltAz(found[1], found[2], lat, lon, dt);
+  view.centerAlt = pos.alt;
+  view.centerAz = pos.az;
+  centerAltEl.value = view.centerAlt.toFixed(2);
+  centerAzEl.value = view.centerAz.toFixed(2);
+  render();
+});
+
+// center apply
+applyCenter.addEventListener('click', ()=>{
+  view.centerAlt = parseFloat(centerAltEl.value) || view.centerAlt;
+  view.centerAz = parseFloat(centerAzEl.value) || view.centerAz;
+  render();
+});
+
+// datetime initial value set to now in UTC
+setNow();
+render();
+
+// heartbeat: update time smoothly if user leaves set to now (we won't auto-update unless they press now)
+</script>
+</body>
+</html>
